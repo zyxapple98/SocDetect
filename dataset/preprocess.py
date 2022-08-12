@@ -40,7 +40,7 @@ def event_2_npvideo(row, before=1, after=1, sample_every=2, verbose=False):
         success, image = vidcap.read()
 
         count += 1
-    return np_video
+    return np_video  # RGB np arrays
 
 
 clip_transform = transforms.Compose([
@@ -74,7 +74,7 @@ def event_2_clip(row,
             img = img.numpy()
             img = np.transpose(img, (1, 2, 0))
             img = cv2.cvtColor(np.uint8((img / 2 + 0.5) * 255),
-                               cv2.COLOR_BGR2RGB)
+                               cv2.COLOR_RGB2BGR)
             cv2.imwrite(os.path.join(path, f"{i}.png"), img)
     return clip
 
@@ -172,23 +172,31 @@ def sample_data(data_path, sample_size=(4000, 4000, 4000, 4000)):
     assert id_2_event <= class_names  # check if all classes have generated data
     X = []
     y = []
-    for i in range(4):
+    for i, sample_num in enumerate(sample_size):
         class_path = os.path.join(data_path, id_2_event[i])
         X_class = np.load(os.path.join(class_path, 'X.npy'))
         y_class = np.load(os.path.join(class_path, 'y.npy'))
         size = X_class.shape[0]
-        sample_num = sample_size[i]
         id = np.random.choice(np.arange(size), size=sample_num, replace=False)
         X_class = X_class[id]
         y_class = y_class[id]
-        X.append(X_class)
-        y.append(y_class)
+        if i == 3:
+            X_b = X_class
+            y_b = y_class
+        else:
+            X.append(X_class)
+            y.append(y_class)
     X = np.vstack(X)
     y = np.vstack(y)
+
     print(X.shape)
     print(y.shape)
+    print(X_b.shape)
+    print(y_b.shape)
     np.save(os.path.join(data_path, 'X.npy'), X)
     np.save(os.path.join(data_path, 'y.npy'), y)
+    np.save(os.path.join(data_path, 'X_b.npy'), X_b)
+    np.save(os.path.join(data_path, 'y_b.npy'), y_b)
 
 
 def main():

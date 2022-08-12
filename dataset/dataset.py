@@ -1,18 +1,22 @@
 from torch.utils.data import Dataset
 import torch
 import numpy as np
-import cv2
+from PIL import Image
 import os
-from .preprocess import id_2_event, npvideo_2_clip
+from .preprocess import id_2_event, clip_transform
 
 
 class ClipDataset(Dataset):
 
-    def __init__(self, data_path, train=True):
+    def __init__(self, data_path, train=True, background=False):
         super(ClipDataset, self).__init__()
         self.source = data_path
-        self.clip_index = np.load(os.path.join(data_path, 'X.npy'))
-        self.labels = np.load(os.path.join(data_path, 'y.npy'))
+        if background:
+            self.clip_index = np.load(os.path.join(data_path, 'X_b.npy'))
+            self.labels = np.load(os.path.join(data_path, 'y_b.npy'))
+        else:
+            self.clip_index = np.load(os.path.join(data_path, 'X.npy'))
+            self.labels = np.load(os.path.join(data_path, 'y.npy'))
 
         len = self.clip_index.shape[0]
         test_id = np.random.choice(np.arange(len),
@@ -35,10 +39,10 @@ class ClipDataset(Dataset):
         clip = []
         for index in clip_index[:-1]:
             path = os.path.join(clip_path, str(index) + '.png')
-            image = cv2.imread(path)
+            image = Image.open(path)
+            image = clip_transform(image)
             clip.append(image)
-        clip = npvideo_2_clip(clip)
-        return (clip, torch.tensor(label))
+        return (torch.stack(clip), torch.tensor(label))
 
     def __len__(self):
         return len(self.labels)

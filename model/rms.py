@@ -8,7 +8,7 @@ class RMSNet(nn.Module):
 
     def __init__(self, num_class=4):
         super(RMSNet, self).__init__()
-        self.feature_extractor = models.resnet152(pretrained=True)
+        self.feature_extractor = models.resnet152(weights=models.ResNet152_Weights.DEFAULT)
         self.feature_extractor = nn.Sequential(
             *(list(self.feature_extractor.children())[:-1]))
 
