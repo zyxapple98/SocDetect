@@ -1,34 +1,16 @@
 from torch.utils.data import Dataset
 import torch
-import numpy as np
 from PIL import Image
 import os
-from .preprocess import id_2_event, clip_transform
+from .preprocess import id_2_event, clip_transform, sample_data
 
 
 class ClipDataset(Dataset):
 
-    def __init__(self, data_path, train=True, background=False):
+    def __init__(self, data_path):
         super(ClipDataset, self).__init__()
         self.source = data_path
-        if background:
-            self.clip_index = np.load(os.path.join(data_path, 'X_b.npy'))
-            self.labels = np.load(os.path.join(data_path, 'y_b.npy'))
-        else:
-            self.clip_index = np.load(os.path.join(data_path, 'X.npy'))
-            self.labels = np.load(os.path.join(data_path, 'y.npy'))
-
-        len = self.clip_index.shape[0]
-        test_id = np.random.choice(np.arange(len),
-                                   size=int(len / 5),
-                                   replace=False)
-        train_id = np.delete(np.arange(len), test_id)
-        if train:
-            subset_idx = train_id
-        else:
-            subset_idx = test_id
-        self.clip_index = self.clip_index[subset_idx]
-        self.labels = self.labels[subset_idx]
+        self.clip_index, self.labels = sample_data(data_path)
 
     def __getitem__(self, index):
         clip_index = self.clip_index[index]

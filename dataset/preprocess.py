@@ -163,24 +163,19 @@ def generate_data(root_dir, class_name, out_path='data'):
     np.save(os.path.join(save_path, 'y.npy'), y)
 
 
-def sample_data(data_path, sample_size=(4000, 4000, 4000, 4000)):
+def merge_data(data_path):
     """
     data_path: directory of generated data
-    sample_size: sample number of each class (play, throwin, challenge, background)
     """
     class_names = os.listdir(data_path)
     assert id_2_event <= class_names  # check if all classes have generated data
     X = []
     y = []
-    for i, sample_num in enumerate(sample_size):
-        class_path = os.path.join(data_path, id_2_event[i])
+    for event in id_2_event:
+        class_path = os.path.join(data_path, event)
         X_class = np.load(os.path.join(class_path, 'X.npy'))
         y_class = np.load(os.path.join(class_path, 'y.npy'))
-        size = X_class.shape[0]
-        id = np.random.choice(np.arange(size), size=sample_num, replace=False)
-        X_class = X_class[id]
-        y_class = y_class[id]
-        if i == 3:
+        if event == 'background':
             X_b = X_class
             y_b = y_class
         else:
@@ -199,10 +194,39 @@ def sample_data(data_path, sample_size=(4000, 4000, 4000, 4000)):
     np.save(os.path.join(data_path, 'y_b.npy'), y_b)
 
 
+def sample_data(data_path, sample_size=(30000, 10000)):
+    """
+    data_path: directory of generated data
+    sample_size: sample number of each class (play, throwin, challenge, background)
+    """
+    class_names = os.listdir(data_path)
+    assert id_2_event <= class_names  # check if all classes have generated data
+    X = []
+    y = []
+    for i, sample_num in enumerate(sample_size):
+        if i == 0:
+            X_class = np.load(os.path.join(data_path, 'X.npy'))
+            y_class = np.load(os.path.join(data_path, 'y.npy'))
+        else:
+            X_class = np.load(os.path.join(data_path, 'X_b.npy'))
+            y_class = np.load(os.path.join(data_path, 'y_b.npy'))
+        size = X_class.shape[0]
+        id = np.random.choice(np.arange(size), size=sample_num, replace=False)
+        X_class = X_class[id]
+        y_class = y_class[id]
+        X.append(X_class)
+        y.append(y_class)
+    X = np.vstack(X)
+    y = np.vstack(y)
+
+    return X, y
+
+
 def main():
     root_dir = '/home/trunk/zyx/SocDetect'
     for class_name in id_2_event:
         generate_data(root_dir, class_name)
+    merge_data(os.path.join(root_dir, 'data'))
     sample_data(os.path.join(root_dir, 'data'))
 
 

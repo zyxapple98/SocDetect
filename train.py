@@ -6,6 +6,9 @@ import torch.nn as nn
 from os.path import exists
 import os
 from dataset.dataset import ClipDataset
+from torch.utils.data import random_split
+import math
+
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
@@ -34,15 +37,16 @@ def worker_init_fn(worker_id):
     set_seed(GLOBAL_SEED + worker_id)
 
 
-def rate(step, factor, warmup):
-    if step == 0:
-        step = 1
-    return factor * (min(step**(-0.5), step * warmup**(-1.5)))
+def warm_up_cosine_annealing(step, warmup, Tmax, max=1, min=1e-2):
+    if step < warmup:
+        return step / warmup
+    else:
+        return min + 0.5 * (max - min) * (1.0 + math.cos(
+            (step - warmup) / (Tmax - warmup) * math.pi))
 
 
 def run_epoch(gpu,
-              data_loader_ev,
-              data_loader_ba,
+              data_loader,
               criterion_cls,
               criterion_reg,
               optimizer,
@@ -59,32 +63,16 @@ def run_epoch(gpu,
     reg_err = 0
     total_sample = 0
     if gpu == 0:
-        data_loader_ba = tqdm(data_loader_ba)
-    for X, y in data_loader_ba:
-        X = X.cuda(gpu)
-        cls_label = y[:, 0].long().cuda(gpu)
-        # zero_label = torch.zeros(y.shape[0]).type(torch.float32).cuda(gpu)
-        out_cls, out_reg = model.forward(X)
-        loss = criterion_cls(out_cls.squeeze(), cls_label) + 0 * torch.mean(out_reg.squeeze())
-        y_pred = torch.argmax(out_cls, dim=1)
-        correct_cnt += torch.sum(y_pred == cls_label).item()
-        total_sample += cls_label.shape[0]
-        if mode == "train":
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            scheduler.step()
-        total_loss += loss.item()
-    if gpu == 0:
-        data_loader_ev = tqdm(data_loader_ev)
-    for X, y in data_loader_ev:
+        data_loader = tqdm(data_loader)
+    for X, y in data_loader:
         X = X.cuda(gpu)
         cls_label = y[:, 0].long().cuda(gpu)
         reg_label = y[:, 1].type(torch.float32).cuda(gpu)
         out_cls, out_reg = model.forward(X)
-        loss = criterion_cls(
-            out_cls.squeeze(),
-            cls_label) + 10 * criterion_reg(out_reg.squeeze(), reg_label)
+        reg_label = torch.where(torch.isnan(reg_label), out_reg.squeeze(),
+                                reg_label)
+        loss = criterion_cls(out_cls, cls_label) + 10 * criterion_reg(
+            out_reg.squeeze(), reg_label)
         y_pred = torch.argmax(out_cls, dim=1)
         correct_cnt += torch.sum(y_pred == cls_label).item()
         reg_err += torch.sum(torch.abs(out_reg.squeeze() - reg_label)).item()
@@ -110,7 +98,9 @@ def train_worker(gpu, ngpu, config):
                                 rank=gpu)
         is_main_process = gpu == 0
 
-    model = RMSNet()
+    model = RMSNet(backbone=config['backbone'])
+    # for k, v in model.named_parameters():
+    #     print('{}: {}'.format(k, v.requires_grad))
     model.cuda(gpu)
     module = model
     if distributed:
@@ -122,70 +112,14 @@ def train_worker(gpu, ngpu, config):
     criterion_cls.cuda(gpu)
     criterion_reg.cuda(gpu)
 
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,
-                                        model.parameters()),
-                                 lr=config['base_lr'])
-    lr_scheduler = LambdaLR(
-        optimizer=optimizer,
-        lr_lambda=lambda step: rate(step, 0.1, config['warmup']))
-
-    train_dataset_ev = ClipDataset(config['data_path'],
-                                   train=True,
-                                   background=False)
-    train_dataset_ba = ClipDataset(config['data_path'],
-                                   train=True,
-                                   background=True)
-    val_dataset_ev = ClipDataset(config['data_path'],
-                                 train=False,
-                                 background=False)
-    val_dataset_ba = ClipDataset(config['data_path'],
-                                 train=False,
-                                 background=True)
-
-    if distributed:
-        train_sampler_ev = DistributedSampler(train_dataset_ev,
-                                              num_replicas=ngpu,
-                                              rank=gpu)
-        train_sampler_ba = DistributedSampler(train_dataset_ba,
-                                              num_replicas=ngpu,
-                                              rank=gpu)
-    else:
-        train_sampler_ev = None
-        train_sampler_ba = None
-    train_loader_ev = torch.utils.data.DataLoader(
-        dataset=train_dataset_ev,
-        batch_size=config['batch_size'],
-        shuffle=(distributed is False),
-        sampler=train_sampler_ev,
-        worker_init_fn=worker_init_fn)
-    train_loader_ba = torch.utils.data.DataLoader(
-        dataset=train_dataset_ba,
-        batch_size=config['batch_size'],
-        shuffle=(distributed is False),
-        sampler=train_sampler_ba,
-        worker_init_fn=worker_init_fn)
-    if distributed:
-        val_sampler_ev = DistributedSampler(val_dataset_ev,
-                                            num_replicas=ngpu,
-                                            rank=gpu)
-        val_sampler_ba = DistributedSampler(val_dataset_ba,
-                                            num_replicas=ngpu,
-                                            rank=gpu)
-    else:
-        val_sampler_ev = None
-        val_sampler_ba = None
-    val_loader_ev = torch.utils.data.DataLoader(
-        dataset=val_dataset_ev,
-        batch_size=config['batch_size'],
-        shuffle=(distributed is False),
-        sampler=val_sampler_ev,
-        worker_init_fn=worker_init_fn)
-    val_loader_ba = torch.utils.data.DataLoader(
-        dataset=val_dataset_ba,
-        batch_size=config['batch_size'],
-        shuffle=(distributed is False),
-        sampler=val_sampler_ba,
-        worker_init_fn=worker_init_fn)
+    optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad,
+                                       model.parameters()),
+                                lr=config['base_lr'],
+                                momentum=0.9,
+                                weight_decay=1e-4)
+    lr_scheduler = LambdaLR(optimizer=optimizer,
+                            lr_lambda=lambda step: warm_up_cosine_annealing(
+                                step, config['warmup'], config['Tmax']))
 
     train_loss = []
     train_acc = []
@@ -193,14 +127,44 @@ def train_worker(gpu, ngpu, config):
     val_acc = []
     best_val_acc = 0
     for epoch in range(config['epoch_num']):
+        dataset = ClipDataset(config['data_path'])
+        train_dataset, val_dataset = random_split(
+            dataset=dataset,
+            lengths=[int(len(dataset) * 4 / 5),
+                     int(len(dataset) / 5)])
+
         if distributed:
-            train_loader_ev.sampler.set_epoch(epoch)
-            train_loader_ba.sampler.set_epoch(epoch)
-            val_loader_ev.sampler.set_epoch(epoch)
-            val_loader_ba.sampler.set_epoch(epoch)
+            train_sampler = DistributedSampler(train_dataset,
+                                               num_replicas=ngpu,
+                                               rank=gpu)
+        else:
+            train_sampler = None
+        train_loader = torch.utils.data.DataLoader(
+            dataset=train_dataset,
+            batch_size=config['batch_size'],
+            shuffle=(distributed is False),
+            sampler=train_sampler,
+            worker_init_fn=worker_init_fn)
+
+        if distributed:
+            val_sampler = DistributedSampler(val_dataset,
+                                             num_replicas=ngpu,
+                                             rank=gpu)
+
+        else:
+            val_sampler = None
+        val_loader = torch.utils.data.DataLoader(
+            dataset=val_dataset,
+            batch_size=config['batch_size'],
+            shuffle=(distributed is False),
+            sampler=val_sampler,
+            worker_init_fn=worker_init_fn)
+
+        if distributed:
+            train_loader.sampler.set_epoch(epoch)
+            val_loader.sampler.set_epoch(epoch)
         loss, acc, err, time = run_epoch(gpu,
-                                         train_loader_ev,
-                                         train_loader_ba,
+                                         train_loader,
                                          criterion_cls,
                                          criterion_reg,
                                          optimizer,
@@ -215,8 +179,7 @@ def train_worker(gpu, ngpu, config):
             train_loss.append(loss)
             train_acc.append(acc)
         loss, acc, err, time = run_epoch(gpu,
-                                         val_loader_ev,
-                                         val_loader_ba,
+                                         val_loader,
                                          criterion_cls,
                                          criterion_reg,
                                          optimizer,
@@ -264,13 +227,15 @@ def train_model(config):
 def load_trained_model():
     print("Loading model...")
     config = {
+        'backbone': 'resnet152',
         'data_path': '/home/trunk/zyx/SocDetect/data',
         'batch_size': 24,
-        'epoch_num': 100,
+        'epoch_num': 50,
         'save_prefix': 'weights/rms_',
         'distributed': True,
-        'warmup': 500,
-        'base_lr': 0.1
+        'warmup': 191,  # warm up during epoch 1
+        'Tmax': 191 * 50,  # reach minimal lr at epoch 50
+        'base_lr': 0.025
     }
     model_path = "%sbest.pt" % config["save_prefix"]
     if not exists(model_path):
@@ -286,4 +251,5 @@ if __name__ == '__main__':
     # print(torch.__version__)
     # print(torch.cuda.is_available())
     # print(torch.version.cuda)
+    #
     load_trained_model()
