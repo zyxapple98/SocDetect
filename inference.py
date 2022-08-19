@@ -9,77 +9,81 @@ import cv2
 import pandas as pd
 from PIL import Image
 import numpy as np
+from tqdm import trange
 
 softmax = nn.Softmax(dim=1)
 
+def inference(model, file_path, gpu=False, batch_size = 8, sample_every=5, clip_length=11):
+    times = []
+    events = []
+    scores = []
 
-def video_duration(filename):
-    cap = cv2.VideoCapture(filename)
-    if cap.isOpened():
-        rate = cap.get(5)
-        frame_num = cap.get(7)
-        duration = frame_num / rate
-        return duration
-    return -1
-
-
-def spot_2_clip(file_path, spot, before=1, after=1, sample_every=5):
-    filename = "temp.mp4"
-    ffmpeg_extract_subclip(file_path,
-                           spot - before,
-                           spot + after,
-                           targetname=filename)
-    vidcap = cv2.VideoCapture("temp.mp4")
+    batch_num = 0
+    vidcap = cv2.VideoCapture(file_path)
+    frame_num = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
     clip = []
-
-    success, image = vidcap.read()
-    count = 0
-    while success:
+    batch = []
+    for count in trange(frame_num):
+        ret, image = vidcap.read()
+        assert ret == True
         if not count % sample_every:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image = cv2.resize(image, [398, 224])
             image = Image.fromarray(image)
             image = clip_transform(image)
             clip.append(image)
-        success, image = vidcap.read()
+            if len(clip) == clip_length:
+                batch.append(torch.stack(clip))
+                clip = [clip[0]]
+                if len(batch) == batch_size:
+                    if gpu:
+                        out_cls, out_reg = model(torch.stack(batch).cuda())
+                        event = torch.argmax(out_cls, dim=1).cpu().numpy().tolist()
+                    else:
+                        out_cls, out_reg = model(torch.stack(batch))
+                        event = torch.argmax(out_cls, dim=1).numpy().tolist()
+                    start_time = batch_num * batch_size * 2
+                    batch_num += 1
+                    for i, ev in enumerate(event):
+                        if ev != 3:  # not background
+                            score = softmax(out_cls)[i, ev].item()
+                            time = start_time + i*2 + out_reg[i, 0].item()  * 2
+                            times.append(time)
+                            events.append(id_2_event[ev])
+                            scores.append(score)
+                    batch.clear()
 
-        count += 1
-    return torch.stack(clip)
-
-
-def inference(model, file_path, threshold=0.6):
-    duration = video_duration(file_path)
-    assert duration >= 0
-    times = []
-    events = []
-    scores = []
-    clip_spots = list(range(1, int(duration) - 1))
-    for spot in clip_spots:
-        clip = spot_2_clip(file_path, spot).unsqueeze(0).cuda()
-        assert clip.shape[1] == 11
-        out_cls, out_reg = model(clip)
-        event = torch.argmax(out_cls, dim=1).item()
-        score = softmax(out_cls)[0, event].item()
-        time = spot - 1 + out_reg.squeeze().item() * 2
-        if score > threshold:
+    # handle last unfinished batch
+    if gpu:
+        out_cls, out_reg = model(torch.stack(batch).cuda())
+        event = torch.argmax(out_cls, dim=1).cpu().numpy().tolist()
+    else:
+        out_cls, out_reg = model(torch.stack(batch))
+        event = torch.argmax(out_cls, dim=1).numpy().tolist()
+    start_time = batch_num * 2
+    for i, ev in enumerate(event):
+        if ev != 3:  # not background
+            score = softmax(out_cls)[i, ev].item()
+            time = start_time + i*2 + out_reg[i, 0].item()  * 2
             times.append(time)
-            events.append(id_2_event[event])
+            events.append(id_2_event[ev])
             scores.append(score)
+    
     return times, events, scores
 
-
-def output(out_file='submission.csv'):
+def output(out_file='submission.csv', gpu=False):
     model = load_trained_model()
     model.eval()
-    model.cuda()
-    test_path = '/home/trunk/zyx/SocDetect/train'
+    if gpu:
+        model.cuda()
+    test_path = '/home/trunk/zyx/SocDetect/test'
     ID = []
     TIME = []
     EVENT = []
     SCORE = []
     for file in os.listdir(test_path):
         file_path = os.path.join(test_path, file)
-        times, events, scores = inference(model, file_path)
+        times, events, scores = inference(model, file_path, gpu=gpu)
         ids = [file.split('.')[0]] * len(times)
         ID.extend(ids)
         TIME.extend(times)
@@ -94,16 +98,17 @@ def output(out_file='submission.csv'):
     df.to_csv(out_file, index=False)
 
 
-def output_train(out_file='submission.csv'):
+def output_train(out_file='submission.csv', gpu=False):
     model = load_trained_model()
     model.eval()
-    model.cuda()
+    if gpu:
+        model.cuda()
     file_path = '/home/trunk/zyx/SocDetect/train/1606b0e6_0.mp4'
     ID = []
     TIME = []
     EVENT = []
     SCORE = []
-    times, events, scores = inference(model, file_path)
+    times, events, scores = inference(model, file_path, gpu=gpu)
     ids = ['1606b0e6_0'] * len(times)
     ID.extend(ids)
     TIME.extend(times)
@@ -120,7 +125,7 @@ def output_train(out_file='submission.csv'):
 
 if __name__ == '__main__':
     output_file = 'submission.csv'
-    # output_train(output_file)
+    output_train(output_file, gpu=False)
     solution = pd.read_csv('/home/trunk/zyx/SocDetect/train.csv',
                            usecols=['video_id', 'time', 'event'])
 
